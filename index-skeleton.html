@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style type="text/css">
+body
+{ 
+height:100%;
+}
+
+.sites
+{
+width:16%;
+display:block;
+position:absolute;
+left:10;
+top:0;
+height:100%;
+margin:0px;
+overflow:auto;
+}
+
+.windows
+{
+width:80%;
+display:block;
+position:absolute;
+left:18%;
+top:0;
+height:95%;
+}
+
+.window
+{
+width:100%;
+height:90%;
+}
+</style>
+<script type="text/javascript">
+function UpdatePolicy() {
+  for(i=0;i<document.forms[0].site.length;i++) {
+    if (document.forms[0].site[i].checked) {
+      parts = document.forms[0].site[i].value.split("|||");
+      document.getElementById("original").href = parts[0];
+      document.getElementById("original").innerHTML = "Show the original privacy policy";
+      document.getElementById("extracted").src = parts[1];
+    }
+  }
+}
+</script>
+</head>
+<body>
+<div class="sites">
+<p>Select a website (<a href="site-policies.txt">list</a>)</p>
+<form>
+{0}
+</form> 
+</div>
+
+<div class="windows">
+<p><a id="original" target="_blank" href="about:blank"></a></p>
+<iframe id="extracted" src="about:blank" class="window">
+<p>Your browser does not support iframes.</p>
+</iframe>
+</div>
+
+</body>
+</html>
+
