@@ -24,17 +24,17 @@ from boilerpipe.extract import Extractor
 
 # general
 startTime = time.time()
-collectPolicies = False
+collectPolicies = True
 verbose = False
 azureSleepSeconds = 1
 minLinesPerPolicy = 1
 
 # paths
-dataDir = '/usr0/home/wammar/privacy/data/{0}'.format(startTime)
+dataDir = '/usr0/home/wammar/privacy-policy-reader/data/{0}'.format(startTime)
 dataUrl = 'http://lausanne.ark.cs.cmu.edu:8050/{0}'.format(startTime)
-manualSitePolicyPairsFile = '/usr0/home/wammar/privacy/manualSitePolicyPairs.txt'
-stopwordsFilename = '/usr0/home/wammar/privacy/stopwords.txt'
-skeletonFilename = '/usr0/home/wammar/privacy/index-skeleton.html'
+manualSitePolicyPairsFile = '/usr0/home/wammar/privacy-policy-reader/manualSitePolicyPairs.txt'
+stopwordsFilename = '/usr0/home/wammar/privacy-policy-reader/stopwords.txt'
+skeletonFilename = '/usr0/home/wammar/privacy-policy-reader/index-skeleton.html'
 tosDrRulesDir = '/usr0/home/wammar/privacy/tos-dr/tosback2/rules'
 sitePoliciesFilename = 'site-policies.txt'
 
@@ -53,17 +53,17 @@ allowPolicyUrlNotIncludePrivacyToken = True
 allowPolicyUrlToHaveForeignExtensions = True
 
 # which sites to include?
-useAlexaSites = False
+useAlexaSites = True
 useTosDrSites = False
 useStopwords = False
-useManualSitePolicyPairsFile = False
+useManualSitePolicyPairsFile = True
 
 # alexa crawling details
 alexaPages = 1
 alexaSleepSeconds = 3
 
 # chunk specification for crowdsourcing annotations
-chunkCharLength = 2240
+chunkCharLength = 5000
 
 # builds a list of entries. each entry is either a string or a coherent html fragment which readers wouldn't split in two pages.
 class AtomicTextExtractor(HTMLParser.HTMLParser):
@@ -86,9 +86,15 @@ class AtomicTextExtractor(HTMLParser.HTMLParser):
       return
     attrsList = []
     for attr in attrs:
-      if tag == 'a' and attr[0] == 'href' and not attr[1].startswith('http'):
-        attr = (attr[0], urljoin(self.url, attr[1]))
-      attrsList.append(u'{0}="{1}"'.format(attr[0], attr[1]))
+      # we want links to appear as links, but not to function as links
+      if tag == 'a' and attr[0] == 'href':
+        if attr[1].startswith('javascript') or attr[1].startswith('mailto'):
+          attr = (attr[0], "javascript:alert('Disabled.')")
+        elif not attr[1].startswith('http'):
+          attr = (attr[0], "javascript:alert('Disabled.')")
+      # sometimes the attribute name/value contains words which should be highlighted. this makes replacing the words complicated later. so lets just get rid of them! 
+      attr = (keywordsRegex.sub(r"placeholder", attr[0]), keywordsRegex.sub(r"placeholder", attr[1]))
+      attrsList.append(u'{0}={1}'.format(attr[0], attr[1]))
     attrsString = '' if len(attrsList) == 0 else u' ' + ' '.join(attrsList)
     if self.insideBody and tag in set(['p', 'span', 'a', 'b', 'i', 'ul', 'ol', 'h1', 'h2', 'h3', 'strong']):
       self.insideAtom = True
@@ -105,11 +111,12 @@ class AtomicTextExtractor(HTMLParser.HTMLParser):
           break
       if len(self.atomStack) == 0:
         self.insideAtom = False
+        self.atoms.append('\n')
   def handle_startendtag(self, tag, attrs):
-    self.atoms.append('<{0} /> '.format(tag))
+    self.atoms.append('<{0} />'.format(tag))
   def handle_data(self, data):
     if self.insideBody:
-      self.atoms.append(data.replace('\n', ' '))
+      self.atoms.append(data.replace('\n', ' ')+'\n')
 
 # an HTML parser for alexa web pages
 class AlexaParser(HTMLParser.HTMLParser):
@@ -315,7 +322,12 @@ def ExtractPolicyTextWithBoilerpipe(policyUrl, extractorType = 'ArticleExtractor
     return (None, None)
   
   try:
-    extractor = Extractor(extractor=extractorType, url=policyUrl)
+    if policyUrl.startswith('http'):
+      extractor = Extractor(extractor=extractorType, url=policyUrl)
+    # the policyUrl may also be a local file path
+    else:
+      contentFile = open(policyUrl, 'r')
+      extractor = Extractor(extractor=extractorType, html=contextFile.read().decode('utf8'))
     html = extractor.getHTML()
     text = extractor.getText()
     
@@ -371,22 +383,56 @@ def PersistPolicyHtml(index, site, policyUrl, policyHtml):
 
 keywordsRegex = re.compile('(personal information|personally identifiable|personal data|personal|data|information|name|address|email|e-mail|credit card|debit card|share|sharing|purpose|transfer|access|collect|gather|receive|deletion|deleting|storage|government|request|Third-Party|service providers|restriction|consent|terms of service)', re.IGNORECASE)
 def HighlightKeywords(piece):
-  return keywordsRegex.sub(r"<span  style='background-color:rgb(255,0,255);'>\1</span>", piece)
+  return keywordsRegex.sub(r"<span  style='background-color:rgb(255,251,196);'>\1</span>", piece)
 
+closingTagRegex = re.compile('\s*</', re.UNICODE)
+someTagRegex = re.compile('\s*<(p|li|a) ', re.UNICODE)
+freeTextRegex = re.compile('\s*[^<\s]', re.UNICODE)
+endsWithClosingHRegex = re.compile('</h\d>', re.UNICODE)
 def SplitHtmlIntoChunks(policyUrl, policyHtml, avgChunkLength):
   if policyHtml == None:
     return None
   # first get a list of all text nodes in the html
   parser = AtomicTextExtractor(policyUrl)
   parser.feed(policyHtml)
-  # then split greedily such that each 
+  # then split greedily to maintain an average chunk length
   chunks = ['']
   for atom in parser.atoms:
+    encodedAtom = atom.encode('utf8')
+    encodedCurrent = chunks[-1].encode('utf8')
     currentLengthOfLastChunk = len(chunks[-1])
+    # if the current chunk is too small
     if currentLengthOfLastChunk < avgChunkLength:
       chunks[-1] += atom
+#      print 'same chunk => currentLength = {0} < {1}'.format(currentLengthOfLastChunk, avgChunkLength)
+    # the current chunk may not end with a :
+    elif chunks[-1][-1] == ':':
+      chunks[-1] += atom
+#      print 'same chunk => current chunk ends with a colon:{0}'.format(encodedCurrent)
+    # the current chunk may not end with a </h4> nor an </h3> nor an </h2> nor an </h1>
+    elif endsWithClosingHRegex.match(chunks[-1]):
+      chunks[-1] += atom
+#      print 'same chunk => current chunk ends with </h\d>:{0}'.format(encodedCurrent)
+    # the new chunk may not start with a blank atom 
+    elif len(atom.strip()) == 0:
+      chunks[-1] += atom
+#      print 'same chunk => blank atom:{0}'.format(encodedAtom)
+    # the new chunk cannot start with a closing tag
+    elif closingTagRegex.match(atom):
+      chunks[-1] += atom
+#      print 'same chunk => cannot start a new chunk with a closing tag:{0}'.format(encodedAtom)
+    # the new chunk cannot start with certain tags (p, li, a)
+    elif someTagRegex.match(atom):
+      chunks[-1] += atom
+#      print 'same chunk => cannot start a new chunk with some tags:{0}'.format(encodedAtom)
+    # the new chunk cannot start with plain text
+    elif freeTextRegex.match(atom):
+      chunks[-1] += atom
+#      print 'same chunk => cannot start a new chunk with free text:{0}'.format(encodedAtom)
+    # if all these criteria not met, go ahead and create a new chunk for this item
     else:
       chunks.append(atom)
+#      print 'new chunk for:{0}'.format(encodedAtom)
   for i in range(0, len(chunks)):
     chunks[i] = HighlightKeywords(chunks[i])
   return chunks
@@ -406,10 +452,10 @@ def PersistChunks(i, site, policyUrl, chunks):
   chunksFile = open('{0}/{1}-{2}.chunks'.format(dataDir, str(i).zfill(3), site), mode='w')
   chunksCsv = csv.writer(chunksFile, dialect='excel')
   for j in range(0, len(chunks)):
-    field = '<chunk id="{0}-{1}-{2}" /> {3}'.format(str(i).zfill(3), 
-                                                    site, 
-                                                    str(j).zfill(4),
-                                                    chunks[j].encode('utf8'))
+    field = "<chunk id='{0}-{1}-{2}' /> {3}".format(str(i).zfill(3), 
+                                                       site, 
+                                                       str(j).zfill(4),
+                                                       chunks[j].encode('utf8'))
     globalChunksCsv.writerow( [field] )
     chunksCsv.writerow([field])
   chunksFile.close()
@@ -527,7 +573,11 @@ def FindManualPolicies(filename):
   sites = []
   policyUrls = []
   for pair in manualPoliciesFile:
+    # skip empty lines
     if len(pair.strip()) == 0:
+      continue
+    # skip comments
+    elif pair[0] == '#':
       continue
     (site, policyUrl) = pair.strip().split('\t')
     sites.append(site)
