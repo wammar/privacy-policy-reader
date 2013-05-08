@@ -14,6 +14,7 @@ import HTMLParser
 import xml.dom.minidom
 import socket
 import csv
+import ssl
 from urlparse import urljoin
 from httplib import IncompleteRead
 from httplib import BadStatusLine
@@ -24,14 +25,17 @@ from boilerpipe.extract import Extractor
 
 # general
 startTime = time.time()
-collectPolicies = True
+collectPolicies = False # if false, then don't find urls of privacy policies. read it from the cache.
 verbose = False
 azureSleepSeconds = 1
 minLinesPerPolicy = 1
 
 # paths
 dataDir = '/usr0/home/wammar/privacy-policy-reader/data/{0}'.format(startTime)
-dataUrl = 'http://lausanne.ark.cs.cmu.edu:8050/{0}'.format(startTime)
+# the webserver to showcase the collected policies 
+dataUrl = 'http://lausanne.ark.cs.cmu.edu:8050/{0}'.format(startTime) 
+
+# override auto-extracted policy urls
 manualSitePolicyPairsFile = '/usr0/home/wammar/privacy-policy-reader/manualSitePolicyPairs.txt'
 stopwordsFilename = '/usr0/home/wammar/privacy-policy-reader/stopwords.txt'
 skeletonFilename = '/usr0/home/wammar/privacy-policy-reader/index-skeleton.html'
@@ -48,22 +52,28 @@ persistNormalized = True
 persistHtmlChunks = True
 
 # policy url filter behavior
-allowPolicyUrlNotIncludeSiteName = True
-allowPolicyUrlNotIncludePrivacyToken = True
+allowPolicyUrlNotIncludeSiteName = False
+allowPolicyUrlNotIncludePrivacyToken = False
 allowPolicyUrlToHaveForeignExtensions = True
 
 # which sites to include?
 useAlexaSites = True
 useTosDrSites = False
-useStopwords = False
 useManualSitePolicyPairsFile = True
 
+
+useStopwords = False
+
 # alexa crawling details
-alexaPages = 1
+alexaPages = 20
 alexaSleepSeconds = 3
 
 # chunk specification for crowdsourcing annotations
-chunkCharLength = 5000
+chunkCharLength = 5000 * 4
+allowPoliciesWithOneChunk = True
+minChunkCharLength = chunkCharLength * 0.60
+discardPoliciesWithMoreThanKChunks = 1
+
 
 # builds a list of entries. each entry is either a string or a coherent html fragment which readers wouldn't split in two pages.
 class AtomicTextExtractor(HTMLParser.HTMLParser):
@@ -247,7 +257,7 @@ def FindPolicyUrls(sites, azureSleepSeconds):
     authHandler = urllib2.HTTPBasicAuthHandler(passMan)
     opener = urllib2.build_opener(authHandler)
     # to experiment with different queries, use this https://datamarket.azure.com/dataset/explore/8818f55e-2fe5-4ce3-a617-0b8ba8419f65
-    url='https://api.datamarket.azure.com/Data.ashx/Bing/SearchWeb/Web?Query=%27{0}%20privacy%20policy%20or%20notice%27&Market=%27en-US%27&$top=5&$format=json'.format(site)
+    url='https://api.datamarket.azure.com/Data.ashx/Bing/SearchWeb/Web?Query=%27{0}%20privacy%20policy%20or%20notice%27&$top=5&$format=json'.format(site)
     try:
       bingResultInJson = opener.open(url).read()
     except ssl.SSLError as e:
@@ -324,6 +334,7 @@ def ExtractPolicyTextWithBoilerpipe(policyUrl, extractorType = 'ArticleExtractor
   try:
     if policyUrl.startswith('http'):
       extractor = Extractor(extractor=extractorType, url=policyUrl)
+        
     # the policyUrl may also be a local file path
     else:
       contentFile = open(policyUrl, 'r')
@@ -334,6 +345,7 @@ def ExtractPolicyTextWithBoilerpipe(policyUrl, extractorType = 'ArticleExtractor
     if len(text.split(u'\n')) > minLinesPerPolicy:
       if verbose:
         print 'OK'
+      text = text.replace(u'\n', u'  ')
       return (text, html)
     elif len(text) > 0 and len(html) > 0:
       print 'Policy {1} ignored. Number of paragraphs in extracted policy is less than {0}.'.format(minLinesPerPolicy, policyUrl)
@@ -341,6 +353,9 @@ def ExtractPolicyTextWithBoilerpipe(policyUrl, extractorType = 'ArticleExtractor
     else:
       print 'boilerpipe extracted nothing from {0}'.format(policyUrl)
       return (None, None)
+  except TypeError as e:
+    print 'TypeError thrown while using boilerpipe to extract {0}: {1}'.format(policyUrl, e)
+    return (None, None)
   except socket.error as e:
     print 'socket.error thrown while using boilerpipe to extract {0}: {1}'.format(policyUrl, e)
     return (None, None)
@@ -435,31 +450,76 @@ def SplitHtmlIntoChunks(policyUrl, policyHtml, avgChunkLength):
 #      print 'new chunk for:{0}'.format(encodedAtom)
   for i in range(0, len(chunks)):
     chunks[i] = HighlightKeywords(chunks[i])
+  if len(chunks[-1]) < avgChunkLength * 0.75:
+    if len(chunks) <= 1:
+      if allowPoliciesWithOneChunk:
+        pass
+      else:
+        assert(False) # policy too short
+    else:
+      chunks[-2] += chunks[-1]
+      del chunks[-1]
   return chunks
 
 def WriteHeaderLineInCssChunksFile():
   assert(persistHtmlChunks)
   globalChunksFile = open('{0}/chunks.csv'.format(dataDir), mode='w')
   globalChunksCsv = csv.writer(globalChunksFile, dialect='excel')
-  globalChunksCsv.writerow( ['policy_fragment'] )
+  globalChunksCsv.writerow( ['policy_fragment', 'Q4_A1', 'Q4_A2', 'Q4_A3', 'Q4_A4'] )
   globalChunksFile.close()
 
-def PersistChunks(i, site, policyUrl, chunks):
+def PersistChunks(i, site, policyUrl, chunks, site2, site3, site4):
   if chunks == None:
     return
+  controlAnswersFile = open('{0}/control.txt'.format(dataDir), mode='a')
   globalChunksFile = open('{0}/chunks.csv'.format(dataDir), mode='a')
   globalChunksCsv = csv.writer(globalChunksFile, dialect='excel')
   chunksFile = open('{0}/{1}-{2}.chunks'.format(dataDir, str(i).zfill(3), site), mode='w')
   chunksCsv = csv.writer(chunksFile, dialect='excel')
   for j in range(0, len(chunks)):
-    field = "<chunk id='{0}-{1}-{2}' /> {3}".format(str(i).zfill(3), 
-                                                       site, 
-                                                       str(j).zfill(4),
-                                                       chunks[j].encode('utf8'))
-    globalChunksCsv.writerow( [field] )
-    chunksCsv.writerow([field])
+    chunkId = '{0}-{1}-{2}'.format(str(i).zfill(3), 
+                                   site, 
+                                   str(j).zfill(4))
+    field = "<chunk id='{0}' /> {1}".format(chunkId, chunks[j].encode('utf8'))
+    # construct the four options of the control question
+    site1c, site2c, site3c, site4c = site, site2, site3, site4
+    options = [site1c, site2c, site3c, site4c]
+    for k in range(0, 4):
+      for l in range(k+1, 4):
+        if k == l:
+          continue
+        if options[k] == options[l]:
+          print 'ERROR: {0} = k != l = {1}, but {2} = options[k] == options[l] = {3}'.format(k, l, options[k], options[l])
+        assert(options[k] != options[l])
+    switch_with = (i + j + j ** 2) % 4 + 1
+    temp = site1c
+    if switch_with == 1:
+      pass
+    elif switch_with == 2:
+      site1c = site2c
+      site2c = temp 
+    elif switch_with == 3:
+      site1c = site3c
+      site3c = temp
+    elif switch_with == 4:
+      site1c = site4c
+      site4c = temp
+    else:
+      assert False
+    options = [site1c, site2c, site3c, site4c]
+    # persist the correct control answer
+    siteNotExplicitlyMentioned = '|5' if site.split('.')[0] not in chunks[j] else ''
+    controlAnswersFile.write('{0}\t{1}{2}\n'.format(chunkId, switch_with, siteNotExplicitlyMentioned))
+    for k in range(0, 4):
+      for l in range(1, 4):
+        if k == l:
+          continue
+        assert(options[k] != options[l])
+    globalChunksCsv.writerow( [field, site1c, site2c, site3c, site4c] )
+    chunksCsv.writerow([field, site1c, site2c, site3c, site4c])
   chunksFile.close()
   globalChunksFile.close()
+  controlAnswersFile.close()
 
 def PersistPolicyFullText(index, site, policyUrl, policyText):
   if policyText == None:
@@ -597,6 +657,13 @@ if collectPolicies:
   # add manual site-policy pairs
   if useManualSitePolicyPairsFile:
     (manualSites, manualPolicies) = FindManualPolicies(manualSitePolicyPairsFile)
+    # if a privacy policy is found manually, remove the automatically extracted version
+    for site in manualSites:
+      if site in sites:
+        index = sites.index(site)
+        del sites[index]
+        del policies[index]
+    # merge the two lists
     sites.extend(manualSites)
     policies.extend(manualPolicies)
   # collect pairs of site-policyUrl from the awesome terms-of-service-didn't-read project
@@ -638,7 +705,35 @@ for i in range(0,len(policies)):
   # save the policy html chunks
   if persistHtmlChunks:
     chunks = SplitHtmlIntoChunks(policies[i], policyHtml, chunkCharLength)
-    PersistChunks(i, sites[i], policies[i], chunks)
+
+    # if the length of this policy is not desirable, skip it.
+    if policyHtml == None  or \
+          ( len(chunks) == 1 and len(chunks[0]) < minChunkCharLength ) or \
+          len(chunks) > discardPoliciesWithMoreThanKChunks:
+      continue
+
+    #print 'policy of website {0} consists of {1} chunks where len(chunks[0]) == {2}\n'.format(sites[i], len(chunks), len(chunks[0]))
+
+    # generate possible answers of the control question 
+    k = 1
+    while policies[(i+k)%len(sites)] == '-':
+      k += 1
+    site2 = sites[(i+k)%len(sites)]
+    k += 1
+    while policies[(i+k)%len(sites)] == '-':
+      k += 1
+    site3 = sites[(i+k)%len(sites)]
+    k += 1
+    while policies[(i+k)%len(sites)] == '-':
+      k += 1
+    site4 = sites[(i+k)%len(sites)]
+    options = [sites[i], site2, site3, site4]
+    for m in range(0, 4):
+      for l in range(m+1, 4):
+        if m == l:
+          continue
+        assert( options[m] != options[l] )
+    PersistChunks(i, sites[i], policies[i], chunks, site2, site3, site4)
 
   # save the policy's text
   if persistFullText:
