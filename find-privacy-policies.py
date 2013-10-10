@@ -25,21 +25,23 @@ from boilerpipe.extract import Extractor
 
 # general
 startTime = time.time()
-collectPolicies = False # if false, then don't find urls of privacy policies. read it from the cache.
+collectPolicies = True # if false, then don't find urls of privacy policies. read it from the cache.
 verbose = False
 azureSleepSeconds = 1
 minLinesPerPolicy = 1
 
 # paths
-dataDir = '/usr0/home/wammar/privacy-policy-reader/data/{0}'.format(startTime)
+root = '/Users/rohanr/Documents/Research/Code/privacy-policy-reader/'
+dataDir = root + 'data/{0}'.format(startTime)
 # the webserver to showcase the collected policies 
 dataUrl = 'http://lausanne.ark.cs.cmu.edu:8050/{0}'.format(startTime) 
+externalSitesFilename = root + 'interesting-sites.txt'
 
 # override auto-extracted policy urls
-manualSitePolicyPairsFile = '/usr0/home/wammar/privacy-policy-reader/manualSitePolicyPairs.txt'
-stopwordsFilename = '/usr0/home/wammar/privacy-policy-reader/stopwords.txt'
-skeletonFilename = '/usr0/home/wammar/privacy-policy-reader/index-skeleton.html'
-tosDrRulesDir = '/usr0/home/wammar/privacy/tos-dr/tosback2/rules'
+manualSitePolicyPairsFile = root + 'manualSitePolicyPairs.txt'
+stopwordsFilename = root + 'stopwords.txt'
+skeletonFilename = root + 'index-skeleton.html'
+#tosDrRulesDir = '/usr0/home/wammar/privacy/tos-dr/tosback2/rules'
 sitePoliciesFilename = 'site-policies.txt'
 
 # boilerpipe settings
@@ -49,7 +51,7 @@ boilerpipeExtractorType = 'KeepEverythingExtractor' # 'ArticleExtractor'
 persistHtml = True
 persistFullText = True
 persistNormalized = True
-persistHtmlChunks = True
+persistHtmlChunks = False
 
 # policy url filter behavior
 allowPolicyUrlNotIncludeSiteName = False
@@ -57,10 +59,10 @@ allowPolicyUrlNotIncludePrivacyToken = False
 allowPolicyUrlToHaveForeignExtensions = True
 
 # which sites to include?
-useAlexaSites = True
+useAlexaSites = False
 useTosDrSites = False
 useManualSitePolicyPairsFile = True
-
+useExternalSites = True
 
 useStopwords = False
 
@@ -69,7 +71,7 @@ alexaPages = 20
 alexaSleepSeconds = 3
 
 # chunk specification for crowdsourcing annotations
-chunkCharLength = 5000 * 4
+chunkCharLength = 5000000 * 4
 allowPoliciesWithOneChunk = True
 minChunkCharLength = chunkCharLength * 0.60
 discardPoliciesWithMoreThanKChunks = 1
@@ -644,6 +646,11 @@ def FindManualPolicies(filename):
     policyUrls.append(policyUrl)
   return (sites, policyUrls)
 
+def LoadExternalSites():
+  websites = []
+  for line in open(externalSitesFilename):
+    websites.append(line.strip())
+  return websites
 
 # find pairs of site-privacyPolicyUrl
 print 'lets get started!'
@@ -653,7 +660,11 @@ if collectPolicies:
   # collect sites from Alexa then search for their respective privacy policies
   if useAlexaSites:
     sites.extend(CrawlAlexa(alexaPages, alexaSleepSeconds))
-    policies.extend(FindPolicyUrls(sites, azureSleepSeconds))
+  # use a list of websites
+  if useExternalSites:
+    sites.extend(LoadExternalSites())  
+  # now that you have found all the websites of interest, find their privacy policy urls
+  policies.extend(FindPolicyUrls(sites, azureSleepSeconds))
   # add manual site-policy pairs
   if useManualSitePolicyPairsFile:
     (manualSites, manualPolicies) = FindManualPolicies(manualSitePolicyPairsFile)
